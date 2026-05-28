@@ -1,9 +1,9 @@
 # cldx — your remote control for Claude Code
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Version](https://img.shields.io/badge/version-1.0.5-brightgreen.svg)](#release-105)
+[![Version](https://img.shields.io/badge/version-1.0.6-brightgreen.svg)](#release-106)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-522%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-524%20passing-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-beta-yellow.svg)]()
 
 > **cldx is a layer on top of [Claude Code](https://docs.claude.com/en/docs/claude-code) that auto-approves safe tool calls and lets you supervise Claude from your phone via Telegram. Step away from your laptop. Come back to a finished feature.**
@@ -178,6 +178,16 @@ For a complete command reference (terminal slash commands, Telegram slash comman
 - **Per-session interaction log** at `~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log` — every terminal input, every Telegram in/out, every cldx decision, every Claude output. Plain text. `tail -f` friendly.
 - **JSONL event log** at `~/.cldx/sessions/<profile>/<timestamp>.jsonl` — machine-replayable.
 - **Multi-session picker** — arrow keys, `d` to delete, resume from any prior session by date.
+
+---
+
+## Release 1.0.6
+
+Follow-up to 1.0.5 — fixes one remaining approval-classification miss.
+
+- 🐛 **Fix — diff-preview approvals.** Claude Code's `Edit(...)` renderer wraps every long diff line into multiple captured pane rows (each continuation prefixed with `+`); a 30-line README change can balloon to 100+ captured lines, pushing the `❯ 1. Yes` menu past the 80-line wide-tail window we set in 1.0.5. Wide-tail bumped to 200 (full capture). The completion window stays narrow (10 lines) so stale `✻ … for Ns` lines in scrollback can't false-fire.
+- 🐛 **Fix — wrong tool-call attribution.** `_extract_command` now scans bottom-up, so the *most recent* `⏺ Tool(…)` wins when the wide window picks up scrollback from prior turns. Previously top-down — fine when the window was 20 lines, broken once it grew.
+- ✅ 524 passing tests (+2 new regression tests).
 
 ---
 

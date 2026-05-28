@@ -148,26 +148,32 @@ class PromptClassifier:
     def __init__(
         self,
         detection_cfg: dict | None = None,
-        tail_lines: int = 80,
+        tail_lines: int = 200,
         completion_tail_lines: int = 10,
     ):
         cfg = detection_cfg or {}
         # Two windows on the snapshot:
         #
-        #   - ``tail_lines`` (wide, default 80): used to find ACTIVE prompts
-        #     — approval menus, Y/N questions, text-input prompts. Claude
-        #     Code can push the menu high up the pane when the current tool
-        #     call has a long preview (e.g. ``Write(SECURITY.md)`` displays
-        #     the whole file) AND a TodoWrite task list is rendered at the
-        #     bottom. 20 lines was the old default; in practice that loses
-        #     the menu in those cases and we never auto-approve.
+        #   - ``tail_lines`` (wide, default 200 = the full default capture):
+        #     used to find ACTIVE prompts — approval menus, Y/N questions,
+        #     text-input prompts. Claude Code can push the menu arbitrarily
+        #     far up the pane when the current tool call has a long preview
+        #     (``Write(SECURITY.md)`` displays the whole file; ``Edit(README.md)``
+        #     wraps every diff line into multiple captured-pane lines because
+        #     of Claude's diff-rendering UI) AND a TodoWrite task list is
+        #     rendered at the bottom. Empirically 20→80 wasn't always enough
+        #     once Claude's diff wrap markers entered the picture; we now
+        #     scan the whole capture. The approval-menu pattern (``❯.*Yes`` /
+        #     ``1\.\s*Yes.*2\.\s*No``) is highly specific to a *live* menu —
+        #     answered menus disappear from the pane — so scanning wider
+        #     doesn't pick up stale matches from scrollback.
         #
         #   - ``completion_tail_lines`` (narrow, default 10): used for
         #     completion / running detection. These signals must appear at
         #     the literal bottom of the pane (``? for shortcuts`` line plus
         #     the immediately-prior ``✻ <verb> for <time>``). Reusing the
         #     wide window would falsely match a STALE ``✻`` from a previous
-        #     turn that's still visible 60 lines up in scrollback.
+        #     turn that's still visible 60+ lines up in scrollback.
         self.tail_lines = tail_lines
         self.completion_tail_lines = completion_tail_lines
         # Merge user patterns with the built-in fallbacks. Dedup so a user
@@ -275,12 +281,15 @@ class PromptClassifier:
     def _extract_command(tail: str) -> str | None:
         """Best-effort: pull out the command/argument Claude is asking about.
 
-        Scans top-down so the result is stable across redraws — the first
-        `⏺ Bash(...)` indicator in the snapshot wins, even if the pane scrolls
-        and exposes more text below.
+        Scans bottom-up so the MOST RECENT ``⏺ Tool(...)`` line wins. With
+        a wide tail window, scrollback from prior turns can contain older
+        tool calls; we want the one closest to (above) the active approval
+        prompt, which is always the latest in pane order. A previous
+        version scanned top-down for "stability across redraws", but that
+        broke once the tail grew large enough to include other turns.
         """
-        # 1. `Bash(...)`, `Edit(...)`, etc. — top-down for stability.
-        for line in tail.splitlines():
+        lines = tail.splitlines()
+        for line in reversed(lines):
             cleaned = _BOX_PREFIX_RE.sub("", line).strip()
             if not cleaned:
                 continue
@@ -290,7 +299,7 @@ class PromptClassifier:
                 arg = m.group("arg").strip()
                 return f"{tool}({arg})" if arg else tool
 
-        # 2. "Run: ..." / "Run command: ..."
+        # Fallback: "Run: ..." / "Run command: ..." style hint.
         m = _RUN_HINT_RE.search(tail)
         if m:
             return m.group("cmd").strip()

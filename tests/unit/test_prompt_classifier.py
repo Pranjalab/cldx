@@ -313,6 +313,77 @@ def test_approval_survives_long_file_preview_and_todo_panel(classifier):
     assert "3. No" in p.menu_options[-1]
 
 
+def test_approval_survives_long_diff_preview_with_wrapped_lines(classifier):
+    """Reproduces the README-edit approval that 1.0.5 still missed.
+
+    Claude Code's ``Edit(README.md)`` rendering wraps every long diff
+    line into multiple captured-pane lines (each continuation prefixed
+    with ``+``). For a 30-line README change with long markdown content,
+    the wrapped diff can take 100+ captured lines — well past the
+    original 80-line window. With the wider scan, the menu is found.
+    """
+    # Simulate Claude's diff renderer: 40 diff lines each wrapping to
+    # 3 continuation rows. That's 160 captured lines before we even get
+    # to the approval menu — well past the old 80-line tail.
+    diff_lines: list[str] = []
+    for n in range(190, 230):
+        diff_lines.append(
+            f"  {n} +- **Release line {n}** with long markdown content "
+            f"that wraps multiple times because of emoji and code spans"
+        )
+        diff_lines.append(
+            "      +continuation row of diff line — more long content here"
+        )
+        diff_lines.append(
+            "      +another continuation row of the same logical diff line"
+        )
+
+    snapshot = (
+        "❯ update the README\n"
+        "⏺ Edit(README.md)\n"
+        "  ⎿  Updating README.md\n"
+        + "\n".join(diff_lines) + "\n"
+        " ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+        " Do you want to make this edit to README.md?\n"
+        " ❯ 1. Yes\n"
+        "   2. Yes, allow all edits during this session (shift+tab)\n"
+        "   3. No\n"
+        " Esc to cancel · Tab to amend\n"
+    )
+    p = classifier.classify(snapshot)
+    assert p.type == PromptType.APPROVAL_MENU, (
+        "README diff approval still missed — got "
+        f"{p.type.value!r}. The auto-approve flow can't fire."
+    )
+    assert p.extracted_command == "Edit(README.md)", (
+        "_extract_command must pick the most-recent tool call (Edit), not "
+        "any older line that happens to appear higher in the wide tail."
+    )
+    assert p.menu_options[0].startswith("1. Yes")
+
+
+def test_extract_command_picks_most_recent_tool_call(classifier):
+    """When the wide tail includes scrollback from a previous turn, the
+    extracted command must be the one ATTACHED to the live approval —
+    i.e., the LAST ``⏺ Tool(...)`` line in the tail, not the first one."""
+    snapshot = (
+        "❯ first task\n"
+        "⏺ Bash(ls)\n"                          # ← previous turn, stale
+        "  ⎿ a.txt b.txt\n"
+        "✻ Worked for 1s\n"
+        "❯ now edit\n"
+        "⏺ Edit(README.md)\n"                   # ← current turn, live
+        "  ⎿ + new line\n"
+        " Do you want to make this edit to README.md?\n"
+        " ❯ 1. Yes\n"
+        "   2. Yes, allow all edits during this session\n"
+        "   3. No\n"
+    )
+    p = classifier.classify(snapshot)
+    assert p.type == PromptType.APPROVAL_MENU
+    assert p.extracted_command == "Edit(README.md)"
+
+
 def test_completion_uses_narrow_tail_to_avoid_stale_match(classifier):
     """The narrowed completion window must reject a ``✻ … for Ns`` line
     that's far up the pane (older turn) when there's no current

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cldx"
-version = "1.0.5"
+version = "1.0.6"
 description = "Second-layer terminal for Claude Code — auto-approves safe tool calls, bridges approvals to Telegram so you can step away from your laptop."
 readme = "README.md"
 requires-python = ">=3.11"
