@@ -384,6 +384,118 @@ def test_extract_command_picks_most_recent_tool_call(classifier):
     assert p.extracted_command == "Edit(README.md)"
 
 
+# --- structural classifier: scope = last ⏺ → end of pane ----------------
+
+
+def test_long_summary_under_last_dot_still_classifies_as_complete(classifier):
+    """The completion regression from the v1.0.6 push.
+
+    The pane ends with a long ``⏺ Pushed ... Summary:`` block followed
+    by ``✻ Churned for 35s`` and the input box. The whole block is the
+    'state slice' between the last ⏺ and the bottom — it MUST classify
+    as COMPLETE so the green panel + Telegram summary fire, regardless
+    of how long the summary is.
+    """
+    summary_body = "\n".join(
+        f"  - bullet number {n} with a fairly long description of the change"
+        for n in range(1, 25)
+    )
+    snapshot = (
+        "❯ push the code\n"
+        "⏺ Bash(git push origin main)\n"
+        "  ⎿ 73205a7..e61c830  main -> main\n"
+        "⏺ Pushed e61c830 to origin/main. Summary:\n"
+        "\n"
+        + summary_body + "\n"
+        "\n"
+        "  To pick it up locally: cd ~/proj && ./install.sh\n"
+        "\n"
+        "✻ Churned for 35s\n"
+        "\n"
+        "─────────────────────────────────────────\n"
+        "❯\n"
+        "─────────────────────────────────────────\n"
+        "  ? for shortcuts · ← for agents\n"
+    )
+    p = classifier.classify(snapshot)
+    assert p.type == PromptType.COMPLETE, (
+        f"Expected COMPLETE, got {p.type.value!r}. The long summary "
+        "between the last ⏺ and the input box must still classify as "
+        "result; otherwise the green panel + Telegram never fire."
+    )
+
+
+def test_approval_classified_via_structural_slice(classifier):
+    """The approval region (last ⏺ → input box) contains the question
+    plus numbered options. Classification must return APPROVAL_MENU
+    regardless of how much diff/preview content sits between them."""
+    diff_lines = "\n".join(
+        f"  {n} +  release note line {n} with some content that wraps"
+        for n in range(180, 220)
+    )
+    snapshot = (
+        "❯ ship 1.0.7\n"
+        "⏺ Edit(README.md)\n"
+        + diff_lines + "\n"
+        " ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+        " Do you want to make this edit to README.md?\n"
+        " ❯ 1. Yes\n"
+        "   2. Yes, allow all edits during this session (shift+tab)\n"
+        "   3. No\n"
+        " Esc to cancel · Tab to amend\n"
+    )
+    p = classifier.classify(snapshot)
+    assert p.type == PromptType.APPROVAL_MENU
+    assert p.extracted_command == "Edit(README.md)"
+    assert p.menu_options[0].startswith("1. Yes")
+
+
+def test_stale_completion_above_last_dot_does_not_false_fire(classifier):
+    """A ✻ line from a PRIOR turn sits *above* the last ⏺, so it's
+    *outside* the structural slice — it must not be matched. The
+    current turn is an active approval; only that signal matters."""
+    snapshot = (
+        "❯ first task\n"
+        "⏺ Bash(ls)\n"
+        "  ⎿ a.txt b.txt\n"
+        "✻ Worked for 1s\n"                  # ← stale completion (prior turn)
+        "❯ now edit\n"
+        "⏺ Edit(README.md)\n"                # ← last ⏺ — slice starts here
+        "  ⎿ + new line\n"
+        " Do you want to make this edit?\n"
+        " ❯ 1. Yes\n"
+        "   2. Yes, allow all edits during this session\n"
+        "   3. No\n"
+    )
+    p = classifier.classify(snapshot)
+    assert p.type == PromptType.APPROVAL_MENU
+    assert p.extracted_command == "Edit(README.md)"
+
+
+def test_running_classified_via_structural_slice(classifier):
+    """When the slice contains ``esc to interrupt``, classify as RUNNING
+    — even if older completions live above the last ⏺."""
+    snapshot = (
+        "❯ first task\n"
+        "⏺ Bash(ls)\n"
+        "  ⎿ a.txt\n"
+        "✻ Worked for 1s\n"
+        "❯ now build\n"
+        "⏺ Bash(npm install)\n"
+        "  ⎿ installing dependencies...\n"
+        "  esc to interrupt\n"
+    )
+    p = classifier.classify(snapshot)
+    assert p.type == PromptType.RUNNING
+
+
+def test_empty_pane_with_no_dot_anywhere_is_idle(classifier):
+    """A fresh terminal that hasn't shown any ⏺ output yet must be
+    IDLE, not blow up trying to slice."""
+    p = classifier.classify("$ ")
+    assert p.type == PromptType.IDLE
+
+
 def test_completion_uses_narrow_tail_to_avoid_stale_match(classifier):
     """The narrowed completion window must reject a ``✻ … for Ns`` line
     that's far up the pane (older turn) when there's no current

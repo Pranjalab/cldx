@@ -88,7 +88,12 @@ def parse_cli_args() -> argparse.Namespace:
     p.add_argument("--poll-interval", type=float, default=1.0,
                    help="Seconds between pane snapshots (default 1.0).")
     p.add_argument("--mirror-lines", type=int, default=25,
-                   help="How many tail lines of the Claude pane to mirror (default 25).")
+                   help="MINIMUM tail lines of the Claude pane to mirror "
+                        "(default 25). The mirror grows beyond this when "
+                        "needed to show the entire current ⏺ response.")
+    p.add_argument("--mirror-max-lines", type=int, default=200,
+                   help="Hard cap on how tall the mirror can grow when "
+                        "anchored on the last ⏺ bullet (default 200).")
     p.add_argument("--dry-run", action="store_true",
                    help="Classify and decide, but don't send keys to tmux.")
     p.add_argument("--list-panes", action="store_true",
@@ -323,15 +328,77 @@ class BridgeUI:
 
     # --- mirror ---
 
+    @staticmethod
+    def _compute_mirror_slice_start(
+        lines: list[str],
+        mirror_lines: int,
+        mirror_max_lines: int,
+    ) -> int:
+        """Decide where the mirror should start in the snapshot lines.
+
+        Structural anchor: the LAST ``⏺`` bullet — that's where the
+        current Claude response begins. Showing from there guarantees
+        the mirror always displays the full current turn, regardless
+        of how much body content (tables, long previews, multi-paragraph
+        prose) sits between the bullet and the bottom of the pane.
+
+        Bounds:
+        - ``mirror_lines`` is a **minimum** tail: for short responses
+          we still display at least N lines so the mirror doesn't
+          shrink to a single line of output.
+        - ``mirror_max_lines`` is a **hard cap** so an enormous response
+          (rare, but possible) can't blow up the cldx terminal — we
+          fall back to the tail in that case.
+        """
+        n = len(lines)
+        if n == 0:
+            return 0
+
+        last_dot_idx: int | None = None
+        for i in range(n - 1, -1, -1):
+            if lines[i].lstrip().startswith("⏺"):
+                last_dot_idx = i
+                break
+
+        # Default tail.
+        tail_start = max(0, n - mirror_lines)
+
+        if last_dot_idx is None:
+            return tail_start
+
+        # Start at the last ⏺ OR the configured tail, whichever shows
+        # MORE context (smaller index = further up the snapshot).
+        start = min(last_dot_idx, tail_start)
+
+        # Hard cap to avoid runaway mirrors on huge responses.
+        max_start = max(0, n - mirror_max_lines)
+        if start < max_start:
+            start = max_start
+        return start
+
+    def _mirror_slice_start(self, lines: list[str]) -> int:
+        # ``mirror_max_lines`` is new; tolerate older fake-arg namespaces
+        # in tests that haven't been updated yet by falling back to 200.
+        max_lines = getattr(self.args, "mirror_max_lines", 200)
+        return self._compute_mirror_slice_start(
+            lines,
+            self.args.mirror_lines,
+            max_lines,
+        )
+
     def _normalize_tail(self, snapshot: str) -> str:
-        """Stable representation of the pane tail for dedup.
+        """Stable representation of the pane slice for dedup.
 
         Strips trailing whitespace on every line and collapses runs of
         blank lines into single blanks. This makes the mirror dedup
         survive Claude's subtle frame-to-frame redraws (cursor position
         shifts, "Cogitated for Ns" timer ticking, trailing spaces).
+        Uses the same structural slice as the displayed mirror so the
+        dedup key tracks the same content the user sees.
         """
-        lines = snapshot.splitlines()[-self.args.mirror_lines:]
+        all_lines = snapshot.splitlines()
+        start = self._mirror_slice_start(all_lines)
+        lines = all_lines[start:]
         out: list[str] = []
         prev_blank = False
         for line in lines:
@@ -348,11 +415,12 @@ class BridgeUI:
     def _print_mirror(self, snapshot: str, force: bool = False) -> None:
         """Render the mirror panel with Claude's own ANSI styling preserved.
 
-        Dedup is based on the ANSI-STRIPPED tail (stable across frame
+        Dedup is based on the ANSI-STRIPPED slice (stable across frame
         jitter), but the DISPLAY uses the raw-with-ANSI version from
-        `self.monitor.last_raw_snapshot` so dim placeholder text and
+        ``self.monitor.last_raw_snapshot`` so dim placeholder text and
         coloured tool calls survive. Falls back to plain text only if
-        the raw isn't available yet.
+        the raw isn't available yet. Both views slice from the same
+        structural anchor (last ⏺ bullet) so they show the same lines.
         """
         tail = self._normalize_tail(snapshot)
         if not tail:
@@ -363,8 +431,21 @@ class BridgeUI:
 
         raw = getattr(self.monitor, "last_raw_snapshot", "") or ""
         if raw:
-            raw_lines = raw.splitlines()[-self.args.mirror_lines:]
-            body: Text | str = Text.from_ansi("\n".join(raw_lines).rstrip())
+            raw_lines = raw.splitlines()
+            # Match the ANSI-stripped slice line-for-line by computing
+            # the same start index against the raw line list. This keeps
+            # the displayed mirror and the dedup key in lock-step.
+            stripped_lines = self.monitor.strip_ansi(raw).splitlines()
+            start = self._mirror_slice_start(stripped_lines)
+            # Defensive: raw and ANSI-stripped should have the same line
+            # count (strip_ansi doesn't split lines), but if they ever
+            # drift, fall back to the tail-based start so we don't
+            # index out of range.
+            if start < len(raw_lines):
+                raw_slice = raw_lines[start:]
+            else:
+                raw_slice = raw_lines[-self.args.mirror_lines:]
+            body: Text | str = Text.from_ansi("\n".join(raw_slice).rstrip())
         else:
             body = tail
 
@@ -472,11 +553,21 @@ class BridgeUI:
         they ran through the truncated 💬 cyan panel instead of the
         full ✓ green completion card.
         """
-        from cldx.tool_call import parse_tool_call as _parse_tool
+        from cldx.tool_call import (
+            parse_tool_call as _parse_tool,
+            pane_has_tool_call as _has_tool,
+        )
         # Limit to the recent pane so we don't false-fire on tool calls
         # from much-older turns sitting deep in scrollback.
         tail = "\n".join(snapshot.splitlines()[-80:])
-        return _parse_tool(tail) is not None
+        # Two-pass: the strict parser pulls args off ``⏺ Tool(args)``
+        # lines that fit on a single line. The loose detector catches
+        # multi-line tool calls — e.g. ``⏺ Bash(git commit -m "$(cat
+        # <<'EOF' …)`` where the closing ``)`` lives on a later line.
+        # Without the loose pass, real tasks containing a heredoc were
+        # demoted to the "chat reply" card and skipped the Telegram
+        # task-complete summary.
+        return _parse_tool(tail) is not None or _has_tool(tail)
 
     # Any ❯ line — input area, suggestion, OR submitted message.
     _ANY_CARET_PATTERN = re.compile(r"^\s*❯\s")

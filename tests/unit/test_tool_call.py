@@ -10,6 +10,7 @@ from cldx.tool_call import (
     ToolResult,
     categories,
     lookup,
+    pane_has_tool_call,
     parse_tool_call,
     parse_tool_results,
 )
@@ -337,3 +338,66 @@ def test_signature_with_tool_distinguishes_same_menu():
         tool=parse_tool_call("⏺ Write(b.md)"),
     )
     assert a.signature() != b.signature()
+
+
+# --- pane_has_tool_call: loose multi-line detector ----------------------
+
+
+def test_pane_has_tool_call_detects_multiline_bash_heredoc():
+    """Reproduces the ``git commit`` completion-miss bug.
+
+    Claude renders multi-line Bash commands across multiple pane lines:
+    the opening ``Bash(`` is on the first line, the closing ``)`` is
+    further down. The strict ``parse_tool_call`` parser misses this
+    because it requires both parens on the same line. ``pane_has_tool_call``
+    must still return True so the completion handler shows the green
+    "✅ Task complete" card and sends the Telegram summary — not the
+    cyan "💬 Claude replied" chat card.
+    """
+    pane = (
+        "⏺ Bash(git commit -m \"$(cat <<'EOF'\n"
+        "    Release v1.0.6 — full-capture approval window\n"
+        "    ...\n"
+        "    EOF\n"
+        "    )\")\n"
+        "  ⎿  [main e61c830] Release v1.0.6 ...\n"
+        "      5 files changed, 109 insertions(+), 19 deletions(-)\n"
+        "⏺ Pushed e61c830 to origin/main. Summary:\n"
+        "✻ Churned for 35s\n"
+    )
+    assert pane_has_tool_call(pane) is True
+    # Strict parser still legitimately misses this — that's expected.
+    assert parse_tool_call(pane) is None
+
+
+def test_pane_has_tool_call_detects_singleline_call():
+    """Single-line ``⏺ Tool(args)`` must also return True — both forms
+    of tool call should be recognised by the loose detector."""
+    assert pane_has_tool_call("⏺ Read(/etc/hosts)\n") is True
+    assert pane_has_tool_call("⏺ Write(README.md)\n") is True
+
+
+def test_pane_has_tool_call_rejects_prose_lines():
+    """A prose line that happens to start with ``⏺ <Capitalised>`` but
+    isn't a tool call must NOT be matched — otherwise Claude's final
+    summary ("⏺ Pushed e61c830 to origin/main") would false-fire and
+    we'd lose the chat-vs-task distinction."""
+    pane = (
+        "⏺ Pushed e61c830 to origin/main. Summary:\n"
+        "  - bumped version\n"
+        "  - shipped fixes\n"
+        "✻ Worked for 5s\n"
+    )
+    assert pane_has_tool_call(pane) is False
+
+
+def test_pane_has_tool_call_rejects_unknown_tool_names():
+    """Capitalised name that ISN'T in TOOL_REGISTRY is prose, not a
+    tool call. Only registered tool names count."""
+    pane = "⏺ Foo(bar)\n⏺ NotARealTool(x, y)\n"
+    assert pane_has_tool_call(pane) is False
+
+
+def test_pane_has_tool_call_handles_empty_input():
+    assert pane_has_tool_call("") is False
+    assert pane_has_tool_call(None) is False  # type: ignore[arg-type]

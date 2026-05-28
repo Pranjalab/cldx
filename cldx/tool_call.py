@@ -215,6 +215,48 @@ def _canonicalize_tool_name(name: str) -> str:
 _RESULT_LINE_RE = re.compile(r"^\s*(?:⎿|↳|\|)\s?(?P<body>.*)$")
 
 
+# Loose detector: matches just the *opening* of a tool-call line
+# (``⏺ ToolName(``) without requiring the closing ``)`` on the same
+# line. Needed for multi-line tool calls — Claude Code routinely renders
+# things like ``⏺ Bash(git commit -m "$(cat <<'EOF' …)`` where the
+# closing paren lives on a continuation line further down the pane.
+# The strict :data:`_TOOL_LINE_RE` (used by :func:`parse_tool_call` to
+# extract args) misses those, which used to cause the completion handler
+# to demote real tasks to "chat reply" cards with no Telegram summary.
+_TOOL_LINE_OPEN_RE = re.compile(
+    r"^\s*⏺\s*"
+    r"(?P<tool>[A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*)*)"
+    r"\s*\("
+)
+
+
+def pane_has_tool_call(text: str) -> bool:
+    """Loose boolean check: does ``text`` contain any ``⏺ ToolName(`` line?
+
+    Differs from :func:`parse_tool_call` in two ways:
+
+    1. Doesn't require the closing ``)`` on the same line — handles
+       multi-line tool calls (``Bash`` heredocs, multi-line ``Write``
+       args, etc.).
+    2. Requires the matched name to be a registered tool, so prose
+       lines like ``⏺ Pushed e61c830 to origin/main`` can't false-fire.
+
+    Use this when you only need to know "did Claude do real work?" —
+    e.g. to choose between the ``💬 Claude replied`` cyan card and the
+    ``✅ Task complete`` green card. Use :func:`parse_tool_call` when
+    you actually need the tool name + args.
+    """
+    if not text:
+        return False
+    for line in text.splitlines():
+        m = _TOOL_LINE_OPEN_RE.match(line)
+        if not m:
+            continue
+        if _canonicalize_tool_name(m.group("tool")) in TOOL_REGISTRY:
+            return True
+    return False
+
+
 def parse_tool_call(text: str) -> ToolCall | None:
     """Pull the first ``Tool(args)`` from ``text``.
 

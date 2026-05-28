@@ -152,28 +152,13 @@ class PromptClassifier:
         completion_tail_lines: int = 10,
     ):
         cfg = detection_cfg or {}
-        # Two windows on the snapshot:
-        #
-        #   - ``tail_lines`` (wide, default 200 = the full default capture):
-        #     used to find ACTIVE prompts — approval menus, Y/N questions,
-        #     text-input prompts. Claude Code can push the menu arbitrarily
-        #     far up the pane when the current tool call has a long preview
-        #     (``Write(SECURITY.md)`` displays the whole file; ``Edit(README.md)``
-        #     wraps every diff line into multiple captured-pane lines because
-        #     of Claude's diff-rendering UI) AND a TodoWrite task list is
-        #     rendered at the bottom. Empirically 20→80 wasn't always enough
-        #     once Claude's diff wrap markers entered the picture; we now
-        #     scan the whole capture. The approval-menu pattern (``❯.*Yes`` /
-        #     ``1\.\s*Yes.*2\.\s*No``) is highly specific to a *live* menu —
-        #     answered menus disappear from the pane — so scanning wider
-        #     doesn't pick up stale matches from scrollback.
-        #
-        #   - ``completion_tail_lines`` (narrow, default 10): used for
-        #     completion / running detection. These signals must appear at
-        #     the literal bottom of the pane (``? for shortcuts`` line plus
-        #     the immediately-prior ``✻ <verb> for <time>``). Reusing the
-        #     wide window would falsely match a STALE ``✻`` from a previous
-        #     turn that's still visible 60+ lines up in scrollback.
+        # ``tail_lines`` / ``completion_tail_lines`` are retained for
+        # backward compatibility (callers and tests can still override
+        # them), but classification no longer slices the snapshot by
+        # line count. Instead, it anchors on the LAST ``⏺`` bullet —
+        # see :meth:`classify` for the structural algorithm. The line
+        # counts are used only as a final-fallback when no ``⏺`` line
+        # is present in the snapshot at all (e.g. fresh terminal).
         self.tail_lines = tail_lines
         self.completion_tail_lines = completion_tail_lines
         # Merge user patterns with the built-in fallbacks. Dedup so a user
@@ -193,47 +178,82 @@ class PromptClassifier:
     # --- Public API ---------------------------------------------------------
 
     def classify(self, snapshot: str) -> ClassifiedPrompt:
-        wide_tail = self._tail(snapshot, self.tail_lines)
-        narrow_tail = self._tail(snapshot, self.completion_tail_lines)
-        context = wide_tail
+        """Decide the current state of the pane.
 
-        # Order: ACTIVE PROMPTS > completion > running > idle.
-        #
-        # Why active first: when Claude is asking for approval, the pane
-        # tail contains BOTH the live ``❯ 1. Yes`` menu AND (often) a
-        # stale ``✻ <verb> for Ns`` line from a *previous* chat reply
-        # that's still visible in the scrollback. If completion wins,
-        # we silently absorb the approval and the auto-approve never
-        # fires. The live approval is the actionable state, so it must
-        # take priority. Active prompts use the *wide* window so a long
-        # file preview can't push the menu out of scope; completion uses
-        # the *narrow* window so a stale ``✻`` line doesn't trip it.
-        match = self._first_match(self.patterns.approval_menu, wide_tail)
+        Structural algorithm (how a human reads the pane):
+
+        1. **Find the last ``⏺`` bullet.** Every Claude action/response
+           starts with ``⏺``. The most recent ``⏺`` line is where the
+           "current answer" begins.
+        2. **Take the slice from that ``⏺`` to the end of the snapshot.**
+           This is the state region — what Claude is showing right now.
+        3. **Inspect that slice for signals:**
+
+           - A question + numbered options (``❯ 1. Yes``…) → ``APPROVAL_MENU``.
+           - A ``Y/n`` / ``proceed?`` style line → ``APPROVAL_YN``.
+           - A free-form text input prompt → ``TEXT_INPUT``.
+           - A ``✻ <verb> for <time>`` line → ``COMPLETE``.
+           - An ``esc to interrupt`` / ``Thinking…`` line → ``RUNNING``.
+           - Nothing of the above → ``IDLE``.
+
+        This replaces the previous "wide tail vs narrow tail" line-count
+        heuristic with a single structural slice — long ``Write(...)`` /
+        ``Edit(...)`` previews, multi-paragraph summaries, and TodoWrite
+        panels all live *inside* the slice rather than spilling past it.
+        Stale ``✻ … for Ns`` lines from earlier turns are *outside* the
+        slice (they sit above the last ``⏺``) and cannot false-fire.
+        """
+        if not snapshot:
+            return ClassifiedPrompt(type=PromptType.IDLE)
+
+        lines = snapshot.splitlines()
+        last_dot_idx: int | None = None
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].lstrip().startswith("⏺"):
+                last_dot_idx = i
+                break
+
+        if last_dot_idx is None:
+            # No ``⏺`` anywhere in the snapshot — Claude hasn't produced
+            # output yet (fresh terminal), the whole turn scrolled off
+            # the top, or this is a synthetic/test snapshot with just a
+            # prompt. Use the whole snapshot as the scope so any prompt
+            # patterns still classify; the structural slice is just the
+            # full text.
+            scope = snapshot
+        else:
+            scope = "\n".join(lines[last_dot_idx:])
+        context = scope
+
+        # Priority: active prompts > completion > running > idle. Approval
+        # must win when both a menu and a ✻ appear in the slice — the
+        # menu is the actionable state and must not be swallowed.
+        match = self._first_match(self.patterns.approval_menu, scope)
         if match:
             from cldx.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_MENU,
                 raw_text=match.group(0),
-                extracted_command=self._extract_command(wide_tail),
+                extracted_command=self._extract_command(scope),
                 context=context,
                 matched_pattern=match.re.pattern,
-                menu_options=self._extract_menu_options(wide_tail),
-                tool=_parse_tool(wide_tail),
+                menu_options=self._extract_menu_options(scope),
+                tool=_parse_tool(scope),
             )
 
-        match = self._first_match(self.patterns.approval_yn, wide_tail)
+        match = self._first_match(self.patterns.approval_yn, scope)
         if match:
             from cldx.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_YN,
                 raw_text=match.group(0),
-                extracted_command=self._extract_command(wide_tail),
+                extracted_command=self._extract_command(scope),
                 context=context,
                 matched_pattern=match.re.pattern,
-                tool=_parse_tool(wide_tail),
+                tool=_parse_tool(scope),
             )
 
-        match = self._first_match(self.patterns.text_input, wide_tail)
+        match = self._first_match(self.patterns.text_input, scope)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.TEXT_INPUT,
@@ -242,7 +262,7 @@ class PromptClassifier:
                 matched_pattern=match.re.pattern,
             )
 
-        match = self._first_match(self.patterns.completion, narrow_tail)
+        match = self._first_match(self.patterns.completion, scope)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.COMPLETE,
@@ -251,7 +271,7 @@ class PromptClassifier:
                 matched_pattern=match.re.pattern,
             )
 
-        match = self._first_match(self.patterns.running, narrow_tail)
+        match = self._first_match(self.patterns.running, scope)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.RUNNING,

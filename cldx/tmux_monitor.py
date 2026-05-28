@@ -40,7 +40,7 @@ class TmuxMonitor:
         self,
         pane: str,
         poll_interval: float = 1.0,
-        capture_lines: int = 200,
+        capture_lines: int = 1000,
         stable_polls: int = 2,
     ):
         self.pane = pane
