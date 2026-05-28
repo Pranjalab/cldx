@@ -42,7 +42,7 @@ from cldx.policy_engine import (
 )
 from cldx.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
 from cldx.session_picker import SessionPickerError, list_panes, pick_session
-from cldx.conversation import extract_assistant_step
+from cldx.conversation import extract_assistant_step, extract_final_message
 from cldx.interaction_log import InteractionLog
 from cldx.session_limit import SessionLimit, parse_session_limit
 from cldx.session_store import SessionStore
@@ -635,12 +635,18 @@ class BridgeUI:
         # Trim the snapshot down to just the current task — the LLM gets
         # this richer slice (includes the user's ❯ question for context).
         task_text = self._extract_current_task(snapshot)
-        # The VISIBLE body uses the structural ⏺...✻ extractor so the
-        # green panel + Telegram message show just Claude's response,
-        # not the user's own question rehashed at the top. This is the
-        # user-requested format: "everything between the line that starts
-        # with ⏺ and the line that ends with ✻".
-        visible_step = extract_assistant_step(snapshot) or task_text
+        # The VISIBLE body shows ONLY Claude's final ⏺ block — the
+        # closing summary, not the long chain of intermediate
+        # ``⏺ Write(...)`` / ``⏺ Bash(...)`` tool calls that produced
+        # it. Those are already in the pane and in the interaction log;
+        # the completion panel and the Telegram message should surface
+        # the conclusion. Fall back to the whole step if there's no
+        # discrete final block (e.g. single-action turns).
+        visible_step = (
+            extract_final_message(snapshot)
+            or extract_assistant_step(snapshot)
+            or task_text
+        )
 
         # Real task: build the summary text we'll show + (maybe) send.
         from cldx.agent import Agent
@@ -1777,6 +1783,9 @@ async def run(args: argparse.Namespace) -> int:
         except (KeyboardInterrupt, EOFError):
             console.print("\n[bold]bye.[/]")
             return 0
+        except SessionPickerError as e:
+            console.print(f"[red]session error:[/] {e}")
+            return 2
     else:
         try:
             pane = pick_session(cli_arg=args.session, auto_detect=args.auto_detect)

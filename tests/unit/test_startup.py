@@ -151,6 +151,57 @@ def test_format_ago_handles_iso_8601():
     assert _format_ago("not a date") == "not a date"
 
 
+async def test_run_startup_offers_start_when_no_tmux_server(
+    policy_path, isolated_home, captured_console,
+):
+    """With no tmux server running, list_panes returns [] — startup must still
+    offer the "start new tmux + claude" option instead of crashing."""
+    console, _ = captured_console
+    policy = PolicyEngine(policy_path)
+    memory = Memory()
+
+    fake_runs: list[list[str]] = []
+
+    def fake_runner(cmd):
+        fake_runs.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("cldx.startup.list_panes", return_value=[]), \
+         patch("cldx.startup.recent_sessions", return_value=[]), \
+         patch("cldx.startup._default_runner", side_effect=fake_runner):
+        choice = await run_startup(
+            policy, memory, console=console,
+            input_fn=lambda _prompt: "1",
+        )
+
+    assert isinstance(choice, StartupChoice)
+    assert any("new-session" in " ".join(c) for c in fake_runs)
+
+
+async def test_run_startup_propagates_missing_tmux_binary(
+    policy_path, isolated_home, captured_console,
+):
+    """When the tmux binary is missing entirely, run_startup should let the
+    SessionPickerError propagate so the CLI can show a clean message."""
+    from cldx.session_picker import SessionPickerError
+
+    console, _ = captured_console
+    policy = PolicyEngine(policy_path)
+    memory = Memory()
+
+    def _missing():
+        raise SessionPickerError("Command 'tmux' not found.")
+
+    with patch("cldx.startup.list_panes", side_effect=_missing), \
+         patch("cldx.startup.recent_sessions", return_value=[]):
+        with pytest.raises(SessionPickerError) as excinfo:
+            await run_startup(
+                policy, memory, console=console,
+                input_fn=lambda _prompt: "1",
+            )
+    assert "tmux" in str(excinfo.value)
+
+
 async def test_run_startup_rejects_invalid_input(policy_path, isolated_home,
                                                    captured_console):
     console, _ = captured_console

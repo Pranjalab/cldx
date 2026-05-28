@@ -15,11 +15,16 @@ This module gives us reliable, structural ways to pull out exactly
 those slices — no pattern-list maintenance, no false positives from
 "the line happens to contain a `Yes` in it".
 
-Two public extractors:
+Three public extractors:
 
 - :func:`extract_assistant_step` returns Claude's current turn content
   — every ⏺ block between the latest user message and the trailing ✻,
   with ⏺ / ⎿ markers preserved for visual hierarchy.
+- :func:`extract_final_message` returns ONLY the last ⏺ block before
+  the trailing ✻ — Claude's closing summary line(s), without the
+  intermediate tool-call chatter. Used for the "✓ Task complete"
+  panel and the Telegram completion message, where the user wants the
+  conclusion, not the full transcript.
 - :func:`extract_pending_approval` returns ``(question, options)`` for
   the live approval prompt at the bottom of the pane, anchored on
   ``Do you want to proceed?`` followed by ``❯ 1. Yes``.
@@ -110,6 +115,54 @@ def extract_assistant_step(snapshot: str) -> str:
         return ""
 
     return "\n".join(lines[start_idx:end_idx]).rstrip()
+
+
+def extract_final_message(snapshot: str) -> str:
+    """Return ONLY the last ⏺ block of Claude's current turn.
+
+    Where :func:`extract_assistant_step` returns every ⏺ block between
+    the user message and the trailing ✻ (tool calls + prose + results),
+    this returns just the *final* ⏺ section — Claude's closing summary.
+
+    Why a separate extractor? When Claude does real work — say a series
+    of ``Write(...)`` / ``Bash(...)`` calls followed by a paragraph that
+    summarises what changed — the completion panel and the Telegram
+    "task complete" message should show the **conclusion**, not the
+    full transcript of every tool call along the way. The transcript
+    is already in the pane (and in ``~/.cldx/logs/``); the summary is
+    what the user actually needs.
+
+    Algorithm:
+
+    1. Locate the trailing ``✻ <verb> for <time>`` line (end of turn);
+       default to end-of-snapshot when Claude is still working.
+    2. Walk backwards from that boundary to find the LAST ``⏺`` line.
+    3. Return the slice from that ``⏺`` line to just before ``✻`` —
+       i.e., the final ⏺ block including any indented ⎿ continuation
+       lines that belong to it.
+
+    Returns an empty string when no ⏺ block exists in the current turn.
+    """
+    if not snapshot:
+        return ""
+    lines = snapshot.splitlines()
+    n = len(lines)
+
+    end_idx = n
+    for i in range(n - 1, -1, -1):
+        if _END_INDICATOR_RE.match(lines[i].lstrip()):
+            end_idx = i
+            break
+
+    last_dot_idx: int | None = None
+    for i in range(end_idx - 1, -1, -1):
+        if lines[i].lstrip().startswith("⏺"):
+            last_dot_idx = i
+            break
+    if last_dot_idx is None:
+        return ""
+
+    return "\n".join(lines[last_dot_idx:end_idx]).rstrip()
 
 
 @dataclass(frozen=True)

@@ -263,3 +263,73 @@ def test_completion_builtin_works_with_empty_policy():
     classifier = PromptClassifier(detection_cfg={})
     p = classifier.classify("⏺ Done\n  ? for shortcuts · ← for agents\n")
     assert p.type == PromptType.COMPLETE
+
+
+# --- wide tail: long previews don't hide the approval menu --------------
+
+
+def test_approval_survives_long_file_preview_and_todo_panel(classifier):
+    """Reproduces the SECURITY.md regression.
+
+    Claude Code asks to ``Write(SECURITY.md)``. The pane shows the
+    file's whole content as a preview (60+ lines), the approval menu
+    in the middle, and a TodoWrite task list rendered at the very
+    bottom (~10 lines). With the old 20-line tail, the ``❯ 1. Yes``
+    line falls *outside* the window and the classifier returns IDLE
+    — so the auto-approve flow never fires. With the wider tail, the
+    menu is found and the prompt classifies as APPROVAL_MENU.
+    """
+    file_preview_lines = "\n".join(
+        f"  {n}  preview line {n}" for n in range(1, 61)
+    )
+    todo_panel = "\n".join([
+        "",
+        "7 tasks (5 done, 1 in progress, 1 open)",
+        "◼ Add issue/PR templates + CONTRIBUTING + SECURITY",
+        "◻ Run pytest to verify",
+        "✔ Fix tmux startup crash in session_picker",
+        "✔ Wrap run_startup in cli.py with error handling",
+        "✔ Add tests for graceful tmux failures",
+        "… +2 completed",
+    ])
+    snapshot = (
+        "❯ Add a SECURITY.md\n"
+        "⏺ Write(SECURITY.md)\n"
+        f"{file_preview_lines}\n"
+        "\n"
+        " Do you want to create SECURITY.md?\n"
+        " ❯ 1. Yes\n"
+        "   2. Yes, allow all edits during this session (shift+tab)\n"
+        "   3. No\n"
+        " Esc to cancel · Tab to amend\n"
+        f"{todo_panel}\n"
+    )
+    p = classifier.classify(snapshot)
+    assert p.type == PromptType.APPROVAL_MENU, (
+        "Long Write preview + TodoWrite panel must not hide the approval — "
+        f"got {p.type.value!r}, which would skip the auto-approve flow."
+    )
+    assert p.menu_options[0].startswith("1. Yes")
+    assert "3. No" in p.menu_options[-1]
+
+
+def test_completion_uses_narrow_tail_to_avoid_stale_match(classifier):
+    """The narrowed completion window must reject a ``✻ … for Ns`` line
+    that's far up the pane (older turn) when there's no current
+    completion signal at the bottom. Pairs with the wider approval
+    window: completion shouldn't false-fire just because we widened
+    one direction of the search."""
+    snapshot = (
+        "⏺ first answer\n"
+        "✻ Worked for 1s\n"                     # ← 50 lines from the bottom
+        + "\n".join(f"  scrollback line {n}" for n in range(1, 50)) + "\n"
+        "❯ Build a website\n"
+        "⏺ Write(index.html)\n"
+        "  ⎿ Writing file...\n"
+        "  esc to interrupt\n"                  # ← active running signal
+    )
+    p = classifier.classify(snapshot)
+    assert p.type == PromptType.RUNNING, (
+        "Stale ✻ in scrollback must not trip completion when the bottom "
+        f"of the pane shows Claude is actively running. Got {p.type.value!r}."
+    )

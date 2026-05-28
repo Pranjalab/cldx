@@ -14,6 +14,7 @@ import pytest
 from cldx.conversation import (
     PendingApproval,
     extract_assistant_step,
+    extract_final_message,
     extract_pending_approval,
 )
 
@@ -136,6 +137,80 @@ def test_handles_no_user_message_at_all():
     out = extract_assistant_step(snap)
     assert "Ready to help" in out
     assert "Worked" not in out
+
+
+# --- extract_final_message ----------------------------------------------
+
+
+def test_final_message_returns_only_last_dot_block():
+    """The completion panel should surface Claude's closing summary —
+    not the chain of ``⏺ Write(...)`` / ``⏺ Bash(...)`` tool calls that
+    led up to it. Reproduces the user's "long Telegram message" bug."""
+    snap = (
+        "❯ Do a big task\n"
+        "⏺ Now community docs and templates:\n"
+        "⏺ Write(.github/ISSUE_TEMPLATE/bug_report.md)\n"
+        "  ⎿ Wrote 40 lines\n"
+        "⏺ Write(.github/PULL_REQUEST_TEMPLATE.md)\n"
+        "  ⎿ Wrote 30 lines\n"
+        "⏺ Bash(pytest -q)\n"
+        "  ⎿ 516 passed\n"
+        "⏺ All work complete. Summary of changes:\n"
+        "\n"
+        "  Bug fix — tmux startup crash:\n"
+        "  - cldx/session_picker.py: graceful handling for missing tmux.\n"
+        "  - cli.py: wrapped run_startup in try/except.\n"
+        "✻ Cogitated for 3m 12s\n"
+        "❯\n"
+        "  ? for shortcuts\n"
+    )
+    out = extract_final_message(snap)
+    # Only the final ⏺ block survives.
+    assert out.startswith("⏺ All work complete. Summary of changes:")
+    assert "Bug fix — tmux startup crash" in out
+    assert "cli.py: wrapped run_startup" in out
+    # Intermediate tool calls are dropped.
+    assert "Wrote 40 lines" not in out
+    assert "516 passed" not in out
+    assert "Write(.github/PULL_REQUEST_TEMPLATE.md)" not in out
+    # End-of-turn marker is excluded.
+    assert "Cogitated" not in out
+    # Bottom-of-pane chrome is excluded.
+    assert "? for shortcuts" not in out
+
+
+def test_final_message_handles_single_dot_block():
+    """When the turn has only one ⏺ block, extract_final_message
+    returns the same content as extract_assistant_step."""
+    snap = (
+        "❯ Say hi\n"
+        "⏺ Hi! How can I help?\n"
+        "✻ Sautéed for 1s\n"
+        "❯\n"
+    )
+    out = extract_final_message(snap)
+    assert out == "⏺ Hi! How can I help?"
+
+
+def test_final_message_handles_in_progress_turn_without_end_marker():
+    """No ✻ line yet — use end-of-snapshot as the boundary. The last
+    ⏺ block is whatever Claude is currently producing."""
+    snap = (
+        "❯ Build a website\n"
+        "⏺ Write(index.html)\n"
+        "  ⎿ Writing...\n"
+        "⏺ Edit(style.css)\n"
+        "  ⎿ Editing...\n"
+    )
+    out = extract_final_message(snap)
+    assert out.startswith("⏺ Edit(style.css)")
+    assert "Write(index.html)" not in out
+
+
+def test_final_message_empty_when_no_dot_block():
+    assert extract_final_message("") == ""
+    assert extract_final_message(None) == ""  # type: ignore[arg-type]
+    assert extract_final_message("❯ just typed\n✻ Worked for 1s\n") == ""
 
 
 # --- extract_pending_approval -------------------------------------------

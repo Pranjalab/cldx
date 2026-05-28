@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from cldx.session_picker import (
@@ -9,6 +11,8 @@ from cldx.session_picker import (
     SessionPickerError,
     _auto_detect,
     _looks_like_claude,
+    _run_sync,
+    list_panes,
     pick_session,
 )
 
@@ -143,6 +147,79 @@ def test_pick_session_picks_via_interactive_when_multiple_claude_panes(monkeypat
     assert target in ("claude-a:0.0", "claude-b:0.0")
     # And must NOT be the zsh pane (it was filtered out).
     assert target != "zsh:0.0"
+
+
+# --- graceful failure modes -----------------------------------------------
+
+
+def _fake_completed(returncode: int, stdout: str = "", stderr: str = ""):
+    return subprocess.CompletedProcess(
+        args=["tmux"], returncode=returncode, stdout=stdout, stderr=stderr,
+    )
+
+
+def test_run_sync_raises_clean_error_when_tmux_missing(monkeypatch):
+    """A missing binary surfaces as SessionPickerError, not FileNotFoundError."""
+    def _boom(*a, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "tmux")
+
+    monkeypatch.setattr("cldx.session_picker.subprocess.run", _boom)
+    with pytest.raises(SessionPickerError) as excinfo:
+        _run_sync(["tmux", "list-panes"])
+    assert "not found" in str(excinfo.value).lower()
+    assert "tmux" in str(excinfo.value)
+
+
+def test_list_panes_returns_empty_when_no_tmux_server(monkeypatch):
+    """`no server running` is a clean state — return []."""
+    monkeypatch.setattr(
+        "cldx.session_picker.subprocess.run",
+        lambda *a, **kw: _fake_completed(
+            1, stdout="", stderr="no server running on /tmp/tmux-501/default",
+        ),
+    )
+    assert list_panes() == []
+
+
+def test_list_panes_returns_empty_when_no_sessions(monkeypatch):
+    monkeypatch.setattr(
+        "cldx.session_picker.subprocess.run",
+        lambda *a, **kw: _fake_completed(1, stdout="", stderr="no sessions"),
+    )
+    assert list_panes() == []
+
+
+def test_list_panes_returns_empty_on_connection_error(monkeypatch):
+    """tmux sometimes prints "error connecting to /tmp/tmux-..."."""
+    monkeypatch.setattr(
+        "cldx.session_picker.subprocess.run",
+        lambda *a, **kw: _fake_completed(
+            1, stderr="error connecting to /tmp/tmux-501/default (No such file)",
+        ),
+    )
+    assert list_panes() == []
+
+
+def test_list_panes_propagates_missing_binary(monkeypatch):
+    """Missing tmux must still raise so callers can show a clean error."""
+    def _boom(*a, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "tmux")
+
+    monkeypatch.setattr("cldx.session_picker.subprocess.run", _boom)
+    with pytest.raises(SessionPickerError) as excinfo:
+        list_panes()
+    assert "not found" in str(excinfo.value).lower()
+
+
+def test_list_panes_reraises_unexpected_tmux_error(monkeypatch):
+    """Errors we don't recognise should propagate, not silently swallow."""
+    monkeypatch.setattr(
+        "cldx.session_picker.subprocess.run",
+        lambda *a, **kw: _fake_completed(1, stderr="something genuinely broken"),
+    )
+    with pytest.raises(SessionPickerError) as excinfo:
+        list_panes()
+    assert "something genuinely broken" in str(excinfo.value)
 
 
 def test_pick_session_auto_detect_single_candidate_skips_picker(monkeypatch):

@@ -1,9 +1,9 @@
 # cldx — your remote control for Claude Code
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Version](https://img.shields.io/badge/version-1.0.4-brightgreen.svg)](#release-104)
+[![Version](https://img.shields.io/badge/version-1.0.5-brightgreen.svg)](#release-105)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-508%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-522%20passing-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-beta-yellow.svg)]()
 
 > **cldx is a layer on top of [Claude Code](https://docs.claude.com/en/docs/claude-code) that auto-approves safe tool calls and lets you supervise Claude from your phone via Telegram. Step away from your laptop. Come back to a finished feature.**
@@ -93,7 +93,25 @@ The installer:
 4. Tells you the exact `export PATH=...` line to add to `~/.zshrc` if `cldx` isn't on PATH yet.
 5. Detects stale binaries from a different Python version and offers the one-line `ln -sf` to fix it.
 
-**Override the state location** with `export CLDX_HOME=/some/path`. **Uninstall** with `./install.sh --uninstall` (leaves `~/.cldx/` in place so a re-install keeps your configs).
+**Override the state location** with `export CLDX_HOME=/some/path`. **Uninstall** with `./install.sh --uninstall` (leaves `~/.cldx/` in place so a re-install keeps your configs), or run `./uninstall.sh` for the dedicated uninstaller (see [Uninstall](#uninstall) below).
+
+### Uninstall
+
+A dedicated `./uninstall.sh` script removes the `cldx` package and — at your option — wipes the local state directory at `~/.cldx/`.
+
+```bash
+./uninstall.sh           # remove the package, ask before deleting ~/.cldx
+./uninstall.sh --purge   # remove the package AND wipe ~/.cldx (no prompt)
+./uninstall.sh --keep    # remove the package, keep ~/.cldx untouched
+```
+
+The script:
+
+1. Picks a compatible Python (≥ 3.11; tries 3.13 → 3.12 → 3.11 → `python3`).
+2. Runs `pip uninstall cldx` against that Python.
+3. Optionally removes `~/.cldx/{config,sessions,logs}/` (override location via `CLDX_HOME`).
+
+`./uninstall.sh` is safe to re-run — if `cldx` is already absent or `~/.cldx/` doesn't exist, the relevant step is skipped with a notice. Re-install any time with `./install.sh`.
 
 ### Optional setup wizard
 
@@ -160,6 +178,20 @@ For a complete command reference (terminal slash commands, Telegram slash comman
 - **Per-session interaction log** at `~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log` — every terminal input, every Telegram in/out, every cldx decision, every Claude output. Plain text. `tail -f` friendly.
 - **JSONL event log** at `~/.cldx/sessions/<profile>/<timestamp>.jsonl` — machine-replayable.
 - **Multi-session picker** — arrow keys, `d` to delete, resume from any prior session by date.
+
+---
+
+## Release 1.0.5
+
+Stability and developer-experience release on top of 1.0.4. Highlights:
+
+- 🐛 **Fix — tmux startup crash.** `cldx` no longer raises an uncaught `SessionPickerError` when there's no tmux server or no sessions. It falls back to a clean "start new tmux + claude" option; a missing tmux binary now prints a readable error instead of a Python traceback.
+- 🐛 **Fix — multi-line approvals.** The classifier widened its active-prompt window (20 → 80 lines) so a long `Write(...)` file preview plus the Claude TodoWrite panel can't push the `❯ 1. Yes` menu out of scope. Completion detection moved to a narrower 10-line window so a stale `✻ … for Ns` in scrollback can't masquerade as a fresh completion.
+- 🐛 **Fix — completion result clutter.** New `extract_final_message` extractor; the green "✓ Task complete" panel and the Telegram message now show only Claude's closing summary (the final `⏺` block) instead of the full chain of intermediate `⏺ Bash(…)` / `⏺ Write(…)` tool calls.
+- 📦 **`./uninstall.sh`** — dedicated uninstaller. Removes the package and (interactively or via `--purge` / `--keep`) wipes `~/.cldx`.
+- 🤖 **CI matrix.** `.github/workflows/tests.yml` runs `pytest` on Ubuntu + macOS × Python 3.11 / 3.12 / 3.13. `.github/workflows/publish.yml` publishes to PyPI via OIDC trusted publishing on each GitHub release.
+- 📝 **Community hygiene.** `CONTRIBUTING.md`, `SECURITY.md`, issue + PR templates.
+- ✅ 522 passing tests (+14 since 1.0.4).
 
 ---
 

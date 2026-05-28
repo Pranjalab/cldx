@@ -39,12 +39,31 @@ class Pane:
         return f"{self.target}  [{self.current_command}]  {self.title}".rstrip()
 
 
+# Substrings tmux emits on stderr when no server/session is reachable. Match
+# case-insensitively — the error wording is consistent across tmux versions
+# but capitalisation drifts slightly between OpenBSD/Linux builds.
+_NO_TMUX_SERVER_HINTS = (
+    "no server running",
+    "no sessions",
+    "error connecting",
+    "no current session",
+)
+
+
+def _looks_like_no_tmux_server(stderr: str) -> bool:
+    s = stderr.lower()
+    return any(h in s for h in _NO_TMUX_SERVER_HINTS)
+
+
 async def _run(cmd: list[str]) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        raise SessionPickerError(f"Command {cmd[0]!r} not found.") from None
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise SessionPickerError(
@@ -54,7 +73,10 @@ async def _run(cmd: list[str]) -> str:
 
 
 def _run_sync(cmd: list[str]) -> str:
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise SessionPickerError(f"Command {cmd[0]!r} not found.") from None
     if result.returncode != 0:
         raise SessionPickerError(
             f"command failed ({' '.join(cmd)}): {result.stderr.strip()}"
@@ -63,9 +85,23 @@ def _run_sync(cmd: list[str]) -> str:
 
 
 def list_panes() -> list[Pane]:
-    """Enumerate every pane in every tmux session on the host."""
+    """Enumerate every pane in every tmux session on the host.
+
+    Returns an empty list — instead of raising — when tmux is reachable but
+    there is no running server / no sessions / no panes. Missing tmux binary
+    still raises ``SessionPickerError`` so the caller can show a clean error.
+    """
     fmt = "#{session_name}:#{window_index}.#{pane_index}\t#{pane_current_command}\t#{pane_title}"
-    output = _run_sync(["tmux", "list-panes", "-a", "-F", fmt])
+    try:
+        output = _run_sync(["tmux", "list-panes", "-a", "-F", fmt])
+    except SessionPickerError as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            raise
+        # tmux is installed but has nothing to report — treat as empty.
+        if _looks_like_no_tmux_server(msg):
+            return []
+        raise
     panes: list[Pane] = []
     for line in output.splitlines():
         parts = line.split("\t")

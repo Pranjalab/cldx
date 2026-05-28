@@ -145,9 +145,31 @@ class PromptClassifier:
         r"\? for shortcuts",
     )
 
-    def __init__(self, detection_cfg: dict | None = None, tail_lines: int = 20):
+    def __init__(
+        self,
+        detection_cfg: dict | None = None,
+        tail_lines: int = 80,
+        completion_tail_lines: int = 10,
+    ):
         cfg = detection_cfg or {}
+        # Two windows on the snapshot:
+        #
+        #   - ``tail_lines`` (wide, default 80): used to find ACTIVE prompts
+        #     — approval menus, Y/N questions, text-input prompts. Claude
+        #     Code can push the menu high up the pane when the current tool
+        #     call has a long preview (e.g. ``Write(SECURITY.md)`` displays
+        #     the whole file) AND a TodoWrite task list is rendered at the
+        #     bottom. 20 lines was the old default; in practice that loses
+        #     the menu in those cases and we never auto-approve.
+        #
+        #   - ``completion_tail_lines`` (narrow, default 10): used for
+        #     completion / running detection. These signals must appear at
+        #     the literal bottom of the pane (``? for shortcuts`` line plus
+        #     the immediately-prior ``✻ <verb> for <time>``). Reusing the
+        #     wide window would falsely match a STALE ``✻`` from a previous
+        #     turn that's still visible 60 lines up in scrollback.
         self.tail_lines = tail_lines
+        self.completion_tail_lines = completion_tail_lines
         # Merge user patterns with the built-in fallbacks. Dedup so a user
         # who already listed our generic pattern doesn't compile it twice.
         user_completion = list(cfg.get("completion_patterns", []))
@@ -165,8 +187,9 @@ class PromptClassifier:
     # --- Public API ---------------------------------------------------------
 
     def classify(self, snapshot: str) -> ClassifiedPrompt:
-        tail = self._tail(snapshot, self.tail_lines)
-        context = tail
+        wide_tail = self._tail(snapshot, self.tail_lines)
+        narrow_tail = self._tail(snapshot, self.completion_tail_lines)
+        context = wide_tail
 
         # Order: ACTIVE PROMPTS > completion > running > idle.
         #
@@ -176,33 +199,35 @@ class PromptClassifier:
         # that's still visible in the scrollback. If completion wins,
         # we silently absorb the approval and the auto-approve never
         # fires. The live approval is the actionable state, so it must
-        # take priority.
-        match = self._first_match(self.patterns.approval_menu, tail)
+        # take priority. Active prompts use the *wide* window so a long
+        # file preview can't push the menu out of scope; completion uses
+        # the *narrow* window so a stale ``✻`` line doesn't trip it.
+        match = self._first_match(self.patterns.approval_menu, wide_tail)
         if match:
             from cldx.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_MENU,
                 raw_text=match.group(0),
-                extracted_command=self._extract_command(tail),
+                extracted_command=self._extract_command(wide_tail),
                 context=context,
                 matched_pattern=match.re.pattern,
-                menu_options=self._extract_menu_options(tail),
-                tool=_parse_tool(tail),
+                menu_options=self._extract_menu_options(wide_tail),
+                tool=_parse_tool(wide_tail),
             )
 
-        match = self._first_match(self.patterns.approval_yn, tail)
+        match = self._first_match(self.patterns.approval_yn, wide_tail)
         if match:
             from cldx.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_YN,
                 raw_text=match.group(0),
-                extracted_command=self._extract_command(tail),
+                extracted_command=self._extract_command(wide_tail),
                 context=context,
                 matched_pattern=match.re.pattern,
-                tool=_parse_tool(tail),
+                tool=_parse_tool(wide_tail),
             )
 
-        match = self._first_match(self.patterns.text_input, tail)
+        match = self._first_match(self.patterns.text_input, wide_tail)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.TEXT_INPUT,
@@ -211,7 +236,7 @@ class PromptClassifier:
                 matched_pattern=match.re.pattern,
             )
 
-        match = self._first_match(self.patterns.completion, tail)
+        match = self._first_match(self.patterns.completion, narrow_tail)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.COMPLETE,
@@ -220,7 +245,7 @@ class PromptClassifier:
                 matched_pattern=match.re.pattern,
             )
 
-        match = self._first_match(self.patterns.running, tail)
+        match = self._first_match(self.patterns.running, narrow_tail)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.RUNNING,
