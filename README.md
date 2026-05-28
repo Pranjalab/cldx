@@ -1,9 +1,9 @@
 # cldx — your remote control for Claude Code
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Version](https://img.shields.io/badge/version-1.0.6-brightgreen.svg)](#release-106)
+[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)](#release-110)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-524%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-540%20passing-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-beta-yellow.svg)]()
 
 > **cldx is a layer on top of [Claude Code](https://docs.claude.com/en/docs/claude-code) that auto-approves safe tool calls and lets you supervise Claude from your phone via Telegram. Step away from your laptop. Come back to a finished feature.**
@@ -178,6 +178,20 @@ For a complete command reference (terminal slash commands, Telegram slash comman
 - **Per-session interaction log** at `~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log` — every terminal input, every Telegram in/out, every cldx decision, every Claude output. Plain text. `tail -f` friendly.
 - **JSONL event log** at `~/.cldx/sessions/<profile>/<timestamp>.jsonl` — machine-replayable.
 - **Multi-session picker** — arrow keys, `d` to delete, resume from any prior session by date.
+
+---
+
+## Release 1.1.0
+
+Minor version bump — the classifier and the live mirror were rebuilt around a structural anchor (the last `⏺` bullet), replacing the line-count tail heuristics that kept missing edge cases.
+
+- 🛠 **Structural classifier.** State detection (approval / running / complete / idle) is now anchored on the last `⏺` bullet — the slice from there to the bottom of the pane is the scope, no line-count tail. Long file previews, multi-paragraph summaries, wrapped diff lines, and TodoWrite panels can be arbitrarily large without missing the menu or the `✻ <verb> for <time>` end marker. Same anchor drives `extract_final_message` and `_pane_has_tool_calls`.
+- 🛠 **Mirror anchors on last `⏺`.** The live "claude pane" panel now shows from the last `⏺` to the bottom of the pane, growing past `--mirror-lines` (now a minimum) when needed. New `--mirror-max-lines` hard cap (default 200) keeps the mirror from blowing up on truly enormous responses. Capture window bumped 200 → 1000 lines so a long session doesn't drop the start of the current turn.
+- 🛠 **Multi-line tool-call detection.** Added `pane_has_tool_call(text)` — recognises `⏺ ToolName(...` opening even when the closing `)` lives on a later pane line (Bash heredocs, multi-line `Write` args). Without this, real tasks with heredocs were demoted to "chat reply" cards and skipped the Telegram task-complete summary.
+- 🛠 **`_extract_command` scans bottom-up.** With a wider window, scrollback from prior turns can contain older tool calls; the live one is the most recent in pane order. Bottom-up scan keeps tool-call attribution attached to the active approval.
+- 📚 **`CONTRIBUTING.md`** — rewritten with an explicit issue→PR workflow and a dedicated *"Contributing as an LLM agent"* section laying out hard rules for autonomous coding agents.
+- 📚 **`CLAUDE.md`** — new project-context file for LLM agents working in this repo. Covers architecture, the structural-classifier invariant, conventions, and common gotchas.
+- ✅ 540 passing tests (+16 since 1.0.6).
 
 ---
 
