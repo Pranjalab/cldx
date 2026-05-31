@@ -34,10 +34,12 @@ def test_extracts_single_step():
     assert out == "⏺ Hi! How can I help?"
 
 
-def test_extracts_full_multistep_turn_with_continuations():
-    """Reproduces the user's weather snapshot — three ⏺ blocks plus
-    indented ⎿ continuations and prose. ALL of it must be returned;
-    nothing dropped."""
+def test_extracts_final_text_block_not_tool_calls():
+    """Multi-step turn: only the last non-tool-call ⏺ block is returned.
+
+    Tool-call ⏺ lines (WebSearch, Bash, etc.) are skipped; the final
+    text summary Claude wrote for the user is what gets surfaced.
+    """
     snap = (
         "❯ Search for Indore and Khandwa\n"
         "⏺ Web Search(\"weather Indore today\")\n"
@@ -57,20 +59,17 @@ def test_extracts_full_multistep_turn_with_continuations():
         "  ? for shortcuts · ← for agents\n"
     )
     out = extract_assistant_step(snap)
-    # All three ⏺ headers present.
-    assert "Web Search(\"weather Indore today\")" in out
-    assert "Web Search(\"weather Khandwa today\")" in out
+    # Only the final text ⏺ block — not the intermediate tool calls.
     assert "Here's the weather for Indore and Khandwa today" in out
-    # Indented continuations preserved.
-    assert "Did 1 search in 4s" in out
     assert "Indore, Madhya Pradesh" in out
     assert "Sunny, breezy" in out
     assert "Hazy sunshine" in out
-    # User's own question is NOT echoed in the result.
+    # Tool-call lines and their results are excluded.
+    assert "Web Search(" not in out
+    assert "Did 1 search in 4s" not in out
+    # User's question, ✻ line, and bottom chrome are excluded.
     assert "❯ Search for Indore" not in out
-    # ✻ duration line is excluded.
     assert "Brewed for 10s" not in out
-    # Bottom-of-pane chrome is excluded.
     assert "? for shortcuts" not in out
 
 

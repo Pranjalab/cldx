@@ -60,6 +60,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     # --- write / edit ---
     "Write":         ToolSpec("write",  "elevated",  "✏️",  "create file"),
     "Edit":          ToolSpec("write",  "elevated",  "✏️",  "edit file"),
+    "Update":        ToolSpec("write",  "elevated",  "✏️",  "edit file"),
     "MultiEdit":     ToolSpec("write",  "elevated",  "✏️",  "edit multiple"),
     "NotebookEdit":  ToolSpec("write",  "elevated",  "📓", "edit notebook"),
 
@@ -241,7 +242,7 @@ def _build_tool_call(name: str, args: str) -> ToolCall:
     risk = spec.risk
     if name in ("Bash", "Run"):
         risk = _refine_bash_risk(args)
-    elif name in ("Write", "Edit", "MultiEdit"):
+    elif name in ("Write", "Edit", "Update", "MultiEdit"):
         risk = _refine_file_risk(args)
 
     summary = _summarize(name, args, spec)

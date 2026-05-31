@@ -60,7 +60,7 @@ _APPROVAL_FIRST_OPTION_RE = re.compile(r"^\s*❯\s*1\.\s*Yes", re.IGNORECASE)
 
 
 def extract_assistant_step(snapshot: str) -> str:
-    """Return Claude's current turn content from a pane snapshot.
+    """Return Claude's final text response block for the current turn.
 
     Algorithm (purely structural — no fragile keyword lists):
 
@@ -68,11 +68,14 @@ def extract_assistant_step(snapshot: str) -> str:
        present, treat the end of the snapshot as the boundary (Claude
        is still working).
     2. Find the most recent submitted user message (``❯ <text>``) *before*
-       that boundary.
-    3. Walk forward from just after the user message. Return everything
-       from the FIRST ``⏺`` line up to (but not including) the ``✻``
-       line. The ⏺ markers and indented ⎿ continuations are preserved
-       so the panel keeps Claude Code's visual hierarchy.
+       that boundary — this anchors the current turn.
+    3. Walk **backward** from the boundary through the current turn to
+       find the last ``⏺`` line that is NOT a tool call
+       (``ToolName(args)`` pattern). That is Claude's final text reply
+       to the user — the summary block that follows all the tool calls.
+    4. Fallback: if every ``⏺`` in this turn is a tool call (no final
+       text reply), return from the FIRST ``⏺`` after the user message
+       so the caller still gets the raw tool-call sequence.
 
     Returns an empty string when there's no ⏺ content in the relevant
     slice (e.g. the user just typed and Claude hasn't started yet).
@@ -81,6 +84,8 @@ def extract_assistant_step(snapshot: str) -> str:
         return ""
     lines = snapshot.splitlines()
     n = len(lines)
+
+    from abs.tool_call import parse_tool_call as _is_tool_call
 
     # 1. Locate the trailing ✻ line; default to end-of-snapshot.
     end_idx = n
@@ -100,12 +105,25 @@ def extract_assistant_step(snapshot: str) -> str:
         user_idx = i
         break
 
-    # 3. Find the FIRST ⏺ line strictly after the user message.
+    # 3. Walk backward within the current turn to find the last ⏺ that
+    #    is a text response (not a ToolName(args) call).
     start_idx: int | None = None
-    for i in range(user_idx + 1, end_idx):
-        if lines[i].lstrip().startswith("⏺"):
-            start_idx = i
-            break
+    for i in range(end_idx - 1, user_idx, -1):
+        if not lines[i].lstrip().startswith("⏺"):
+            continue
+        if _is_tool_call(lines[i]) is not None:
+            continue  # tool call — keep searching backward
+        start_idx = i
+        break
+
+    # 4. Fallback: all ⏺ lines are tool calls — return from the first
+    #    ⏺ after the user message (raw tool-call sequence).
+    if start_idx is None:
+        for i in range(user_idx + 1, end_idx):
+            if lines[i].lstrip().startswith("⏺"):
+                start_idx = i
+                break
+
     if start_idx is None:
         return ""
 

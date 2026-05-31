@@ -682,7 +682,7 @@ class BridgeUI:
         # available even when Claude's response spans hundreds of lines.
         try:
             from abs.tmux_monitor import TmuxMonitor as _TM
-            full_raw = await self.monitor.deep_capture(lines=2000)
+            full_raw = await self.monitor.deep_capture()
             snapshot = _TM.strip_ansi(full_raw)
         except Exception:
             pass  # fall back to the regular-capture snapshot passed in
@@ -741,50 +741,10 @@ class BridgeUI:
         # with ⏺ and the line that ends with ✻".
         visible_step = extract_assistant_step(snapshot) or task_text
 
-        # Real task: build the summary text we'll show + (maybe) send.
-        from abs.agent import Agent
-        from abs.summarizer import summarize_with_status
-        try:
-            agent = Agent.load()
-            if getattr(self.args, "no_llm", False):
-                agent.model = "none:raw"
-            result = await summarize_with_status(
-                "completion_summary", task_text, agent,
-            )
-        except Exception as e:  # noqa: BLE001
-            from abs.summarizer import SummaryResult
-            result = SummaryResult(
-                text=task_text,
-                summarized=False,
-                fallback_reason=str(e),
-            )
-
-        # When the LLM didn't produce a summary (disabled / failed), the
-        # raw ``result.text`` is the LLM-input text (which contained the
-        # user's question). Swap it for the clean structural slice so the
-        # panel/Telegram don't echo the user back to themselves.
-        if not result.summarized:
-            result = type(result)(
-                text=visible_step,
-                summarized=False,
-                fallback_reason=result.fallback_reason,
-            )
-
-        # Terminal panel ALWAYS shows the full ⏺...✻ block (visible_step),
-        # regardless of whether the LLM produced a summary. The LLM summary
-        # is shorter and goes to Telegram — but in the terminal the user
-        # wants to see everything Claude actually did.
-        if result.summarized:
-            subtitle = f"[dim]summarised for Telegram via {Agent.load().backend}[/dim]"
-        else:
-            subtitle = (
-                f"[dim]raw pane (LLM unavailable: "
-                f"{result.fallback_reason})[/dim]"
-            )
-
-        # Telegram gets the LLM summary (concise for the phone); terminal
-        # gets the full structural slice.
-        telegram_text = result.text  # summary when available, visible_step otherwise
+        # Both terminal and Telegram show the full ⏺…✻ content captured from
+        # the unlimited deep_capture above — no LLM summarisation.
+        subtitle = "[dim]full pane capture[/dim]"
+        telegram_text = visible_step
         telegram_line = ""
         telegram_send_succeeded = False
         if getattr(self.args, "no_telegram", False):
